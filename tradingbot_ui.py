@@ -21,8 +21,11 @@ class TradingBotUI:
         self.root.title("Binance Futures Trading Bot")
 
         # Use a simple, compact layout
-        self.root.geometry("600x650")
+        self.root.geometry("700x900")
         self.root.resizable(False, False)
+        
+        # Store trader instance for monitor access
+        self.trader = None
 
         main_frame = ttk.Frame(self.root, padding=10)
         main_frame.pack(fill="both", expand=True)
@@ -118,6 +121,15 @@ class TradingBotUI:
         ttk.Entry(main_frame, textvariable=self.tp4_var).grid(row=row, column=1, sticky="ew", pady=2)
         row += 1
 
+        # Auto-monitor checkbox
+        self.auto_monitor_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            main_frame, 
+            text="Auto-start order monitoring (runs in background)",
+            variable=self.auto_monitor_var
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=5)
+        row += 1
+
         # Live trading confirmation note (simple label, no extra prompt)
         self.live_warning_label = ttk.Label(
             main_frame,
@@ -136,11 +148,54 @@ class TradingBotUI:
         self.execute_button.pack()
         row += 1
 
+        # Separator before monitors
+        ttk.Separator(main_frame, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=5)
+        row += 1
+
+        # Active Monitors section
+        monitor_frame = ttk.LabelFrame(main_frame, text="Active Order Monitors", padding=5)
+        monitor_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=5)
+        
+        # Refresh button
+        refresh_frame = ttk.Frame(monitor_frame)
+        refresh_frame.pack(fill="x", pady=2)
+        ttk.Button(refresh_frame, text="🔄 Refresh Status", command=self.refresh_monitor_status).pack(side="left", padx=5)
+        self.monitor_count_label = ttk.Label(refresh_frame, text="Active: 0", font=("TkDefaultFont", 9, "bold"))
+        self.monitor_count_label.pack(side="left", padx=10)
+        
+        # Monitor status display (scrollable)
+        monitor_scroll_frame = ttk.Frame(monitor_frame)
+        monitor_scroll_frame.pack(fill="both", expand=True, pady=5)
+        
+        self.monitor_tree = ttk.Treeview(monitor_scroll_frame, columns=("Symbol", "TPs", "SL", "Runtime"), show="tree headings", height=4)
+        self.monitor_tree.heading("#0", text="SL Order ID")
+        self.monitor_tree.heading("Symbol", text="Symbol")
+        self.monitor_tree.heading("TPs", text="TPs Filled")
+        self.monitor_tree.heading("SL", text="SL Status")
+        self.monitor_tree.heading("Runtime", text="Runtime")
+        
+        self.monitor_tree.column("#0", width=100)
+        self.monitor_tree.column("Symbol", width=80)
+        self.monitor_tree.column("TPs", width=80)
+        self.monitor_tree.column("SL", width=100)
+        self.monitor_tree.column("Runtime", width=80)
+        
+        monitor_scrollbar = ttk.Scrollbar(monitor_scroll_frame, orient="vertical", command=self.monitor_tree.yview)
+        self.monitor_tree.configure(yscrollcommand=monitor_scrollbar.set)
+        
+        self.monitor_tree.pack(side="left", fill="both", expand=True)
+        monitor_scrollbar.pack(side="right", fill="y")
+        
+        row += 1
+
         # Output/log area
         ttk.Label(main_frame, text="Log:").grid(row=row, column=0, sticky="nw")
-        self.log_text = tk.Text(main_frame, height=10, width=50, state="disabled")
+        self.log_text = tk.Text(main_frame, height=8, width=50, state="disabled")
         self.log_text.grid(row=row, column=1, sticky="nsew", pady=2)
         row += 1
+        
+        # Auto-refresh monitors every 5 seconds
+        self.auto_refresh_monitors()
 
         # Grid configuration
         main_frame.columnconfigure(1, weight=1)
@@ -172,6 +227,7 @@ class TradingBotUI:
         threading.Thread(target=self._execute_trade_thread, daemon=True).start()
 
     def _execute_trade_thread(self):
+        trader = None
         try:
             # Collect and validate inputs
             mode = self.mode_var.get().strip().lower()
@@ -225,6 +281,9 @@ class TradingBotUI:
                     return
 
             trader = BinanceFuturesTrader(api_key, api_secret, testnet=testnet)
+            # Store trader instance for monitor access (thread-safe update)
+            self.trader = trader
+            auto_monitor = self.auto_monitor_var.get()
             success = trader.execute_trade(
                 symbol=symbol,
                 direction=direction,
@@ -236,11 +295,15 @@ class TradingBotUI:
                 tp2_price=tp2_price,
                 tp3_price=tp3_price,
                 tp4_price=tp4_price,
-                wait_timeout=wait_timeout
+                wait_timeout=wait_timeout,
+                auto_monitor=auto_monitor
             )
 
             if success:
                 self.append_log("Trade executed successfully ✅")
+                if auto_monitor:
+                    self.append_log("Order monitoring started in background thread")
+                    self.refresh_monitor_status()
                 messagebox.showinfo("Success", "Trade executed successfully.")
             else:
                 self.append_log("Trade execution failed ❌")
@@ -255,6 +318,56 @@ class TradingBotUI:
         finally:
             # Re-enable button
             self.execute_button.configure(state="normal")
+    
+    def refresh_monitor_status(self):
+        """Refresh the monitor status display"""
+        # Clear existing items
+        for item in self.monitor_tree.get_children():
+            self.monitor_tree.delete(item)
+        
+        if not self.trader:
+            self.monitor_count_label.config(text="Active: 0 (No trader instance)")
+            return
+        
+        # Get monitor status
+        try:
+            monitors = self.trader.get_monitor_status()
+            self.monitor_count_label.config(text=f"Active: {len(monitors)}")
+            
+            if len(monitors) == 0:
+                # Show message when no monitors
+                self.monitor_tree.insert("", "end", text="No active monitors", values=("", "", "", ""))
+            else:
+                for monitor in monitors:
+                    sl_id = str(monitor['sl_order_id'])
+                    symbol = monitor['symbol']
+                    tps_filled = f"{monitor['filled_tps']}/{monitor['total_tps']}"
+                    sl_status = monitor['sl_status']
+                    runtime_sec = monitor['runtime_seconds']
+                    runtime_str = f"{runtime_sec//60}m {runtime_sec%60}s"
+                    
+                    # Color coding based on status
+                    tags = []
+                    if monitor['filled_tps'] == 4:
+                        tags.append("success")
+                    elif monitor['sl_status'] == 'Filled':
+                        tags.append("stopped")
+                    
+                    item = self.monitor_tree.insert("", "end", text=sl_id, values=(symbol, tps_filled, sl_status, runtime_str), tags=tags)
+            
+            # Configure tag colors
+            self.monitor_tree.tag_configure("success", foreground="green")
+            self.monitor_tree.tag_configure("stopped", foreground="red")
+            
+        except Exception as e:
+            self.append_log(f"Error refreshing monitor status: {e}")
+            self.monitor_count_label.config(text="Error loading monitors")
+    
+    def auto_refresh_monitors(self):
+        """Auto-refresh monitor status every 5 seconds"""
+        self.refresh_monitor_status()
+        # Schedule next refresh
+        self.root.after(5000, self.auto_refresh_monitors)
 
 
 def main():

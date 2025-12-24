@@ -1,6 +1,7 @@
 import hmac
 import hashlib
 import time
+import threading
 import requests
 from urllib.parse import urlencode
 
@@ -26,6 +27,9 @@ class BinanceFuturesTrader:
             print("⚠️ LIVE TRADING MODE - Real money at risk!")
         
         self.headers = {'X-MBX-APIKEY': api_key}
+        
+        # Track active monitoring threads
+        self.active_monitors = []
     
     def _generate_signature(self, params):
         """Generate HMAC SHA256 signature"""
@@ -95,34 +99,7 @@ class BinanceFuturesTrader:
                     return pos
         return None
     
-    def place_market_order(self, symbol, side, quantity, position_side="BOTH", price=None):
-        """
-        Place a market order
-        
-        Args:
-            symbol (str): Trading pair
-            side (str): 'BUY' or 'SELL'
-            quantity (float): Order quantity
-            position_side (str): 'BOTH', 'LONG', or 'SHORT' (for hedge mode)
-        """
-        endpoint = "/fapi/v1/order"
-        params = {
-            'symbol': symbol,
-            'side': side,
-            'type': 'LIMIT',
-            'quantity': quantity,
-            'positionSide': position_side,
-            'timeInForce': 'GTC',
-            'price': price
-        }
-        
-        result = self._make_request("POST", endpoint, params)
-        if result:
-            print(f"✓ Market order placed: {side} {quantity} {symbol}")
-            return result
-        return None
-
-    def place_limit_order(self, symbol, side, quantity, price, position_side="BOTH"):
+    def place_limit_order(self, symbol, side, quantity, price, position_side="BOTH", time_in_force="GTC"):
         """
         Place a limit order
         
@@ -130,8 +107,9 @@ class BinanceFuturesTrader:
             symbol (str): Trading pair
             side (str): 'BUY' or 'SELL'
             quantity (float): Order quantity
-            price (float): Limit order price
+            price (float): Limit price
             position_side (str): 'BOTH', 'LONG', or 'SHORT' (for hedge mode)
+            time_in_force (str): 'GTC' (Good Till Cancel), 'IOC', 'FOK'
         """
         endpoint = "/fapi/v1/order"
         params = {
@@ -139,17 +117,17 @@ class BinanceFuturesTrader:
             'side': side,
             'type': 'LIMIT',
             'quantity': quantity,
-            'positionSide': position_side,
-            'timeInForce': 'GTC',
-            'price': price
+            'price': price,
+            'timeInForce': time_in_force,
+            'positionSide': position_side
         }
         
         result = self._make_request("POST", endpoint, params)
         if result:
-            print(f"✓ Limit order placed: {side} {quantity} {symbol} at {price}")
+            print(f"✓ Limit order placed: {side} {quantity} {symbol} @ {price}")
             return result
         return None
-
+    
     def cancel_order(self, symbol, order_id):
         """Cancel an open order"""
         endpoint = "/fapi/v1/order"
@@ -163,7 +141,7 @@ class BinanceFuturesTrader:
             print(f"✓ Order {order_id} cancelled")
             return result
         return None
-
+    
     def check_order_status(self, symbol, order_id):
         """Check if order is filled"""
         endpoint = "/fapi/v1/order"
@@ -219,7 +197,7 @@ class BinanceFuturesTrader:
         self.cancel_order(symbol, order_id)
         return False
     
-    def place_stop_loss(self, symbol, side, stop_price, quantity, position_side="BOTH"):
+    def place_stop_loss(self, symbol, side, stop_price, quantity, position_side="BOTH", client_order_id=None):
         """
         Place stop loss order
         
@@ -229,6 +207,7 @@ class BinanceFuturesTrader:
             stop_price (float): Stop loss trigger price
             quantity (float): Order quantity
             position_side (str): 'BOTH', 'LONG', or 'SHORT'
+            client_order_id (str): Custom order ID for tracking
         """
         endpoint = "/fapi/v1/order"
         params = {
@@ -243,13 +222,17 @@ class BinanceFuturesTrader:
             'workingType': 'MARK_PRICE'
         }
         
+        if client_order_id:
+            params['newClientOrderId'] = client_order_id
+        
         result = self._make_request("POST", endpoint, params)
         if result:
-            print(f"✓ Stop Loss placed at {stop_price}")
+            order_id = result.get('orderId')
+            print(f"✓ Stop Loss placed at {stop_price} (Order ID: {order_id})")
             return result
         return None
     
-    def place_take_profit(self, symbol, side, tp_price, quantity, position_side="BOTH"):
+    def place_take_profit(self, symbol, side, tp_price, quantity, position_side="BOTH", client_order_id=None):
         """
         Place take profit order
         
@@ -259,6 +242,7 @@ class BinanceFuturesTrader:
             tp_price (float): Take profit trigger price
             quantity (float): Order quantity (e.g., 25% of position)
             position_side (str): 'BOTH', 'LONG', or 'SHORT'
+            client_order_id (str): Custom order ID for tracking
         """
         endpoint = "/fapi/v1/order"
         params = {
@@ -272,9 +256,13 @@ class BinanceFuturesTrader:
             'workingType': 'MARK_PRICE'
         }
         
+        if client_order_id:
+            params['newClientOrderId'] = client_order_id
+        
         result = self._make_request("POST", endpoint, params)
         if result:
-            print(f"✓ Take Profit placed at {tp_price} for {quantity}")
+            order_id = result.get('orderId')
+            print(f"✓ Take Profit placed at {tp_price} for {quantity} (Order ID: {order_id})")
             return result
         return None
     
@@ -303,10 +291,230 @@ class BinanceFuturesTrader:
         """Round price to match exchange precision"""
         precision = len(str(tick_size).rstrip('0').split('.')[-1])
         return round(price, precision)
-
+    
+    def get_all_open_orders(self, symbol):
+        """Get all open orders for a symbol"""
+        endpoint = "/fapi/v1/openOrders"
+        params = {'symbol': symbol}
+        
+        result = self._make_request("GET", endpoint, params)
+        return result if result else []
+    
+    def monitor_and_manage_orders(self, symbol, sl_order_id, tp_order_ids):
+        """
+        Monitor and manage orders automatically (runs in background thread)
+        
+        Features:
+        - Monitors SL and all 4 TP orders
+        - Shows real-time status: "TPs filled: 2/4"
+        - Auto-cancels SL when all TPs are filled
+        - Auto-cancels remaining TPs when SL is filled
+        - Runs in background so you can place new orders
+        
+        Args:
+            symbol (str): Trading pair
+            sl_order_id (int): Stop Loss order ID
+            tp_order_ids (list): List of 4 Take Profit order IDs
+        """
+        thread_name = threading.current_thread().name
+        print(f"\n{'='*60}")
+        print(f"🔍 ORDER MONITORING ACTIVE [{thread_name}]")
+        print(f"{'='*60}")
+        print(f"Monitoring orders every 10 seconds...")
+        print(f"Symbol: {symbol}")
+        print(f"Stop Loss Order ID: {sl_order_id}")
+        print(f"Take Profit Order IDs: {tp_order_ids}")
+        print(f"Running in background - you can place new orders!")
+        print(f"{'='*60}\n")
+        
+        check_interval = 10  # Check every 10 seconds
+        monitoring = True
+        
+        while monitoring:
+            try:
+                # Check status of all orders
+                sl_status = self.check_order_status(symbol, sl_order_id)
+                tp_statuses = [self.check_order_status(symbol, tp_id) for tp_id in tp_order_ids]
+                
+                # Count filled TPs and track active ones
+                filled_tps = 0
+                active_tp_ids = []
+                
+                for i, tp_status in enumerate(tp_statuses):
+                    if tp_status:
+                        status = tp_status.get('status', 'UNKNOWN')
+                        if status == 'FILLED':
+                            filled_tps += 1
+                        elif status in ['NEW', 'PARTIALLY_FILLED']:
+                            active_tp_ids.append(tp_order_ids[i])
+                    # If order doesn't exist (None), assume it was filled or cancelled
+                    # This handles edge cases where order might have been manually cancelled
+                
+                # Check SL status
+                sl_filled = False
+                sl_active = False
+                if sl_status:
+                    sl_status_value = sl_status.get('status', 'UNKNOWN')
+                    if sl_status_value == 'FILLED':
+                        sl_filled = True
+                    elif sl_status_value in ['NEW', 'PARTIALLY_FILLED']:
+                        sl_active = True
+                
+                # Update monitor status for UI access
+                self._update_monitor_status(symbol, sl_order_id, filled_tps, sl_active, sl_filled)
+                
+                # Display status (with timestamp for better tracking)
+                timestamp = time.strftime("%H:%M:%S")
+                print(f"[{timestamp}] 📊 Status: TPs filled: {filled_tps}/4 | SL: {'Active' if sl_active else 'Filled/Cancelled'}", end='\r')
+                
+                # Scenario 1: All 4 TPs filled - Cancel SL
+                if filled_tps == 4:
+                    print(f"\n\n{'='*60}")
+                    print(f"✓ All 4 Take Profits have been FILLED!")
+                    print(f"{'='*60}")
+                    
+                    # Check if SL is still active
+                    if sl_active:
+                        print(f"Canceling Stop Loss order {sl_order_id}...")
+                        cancel_result = self.cancel_order(symbol, sl_order_id)
+                        if cancel_result:
+                            print(f"✓ Stop Loss successfully cancelled!")
+                        else:
+                            print(f"⚠️ Warning: Failed to cancel Stop Loss. Please check manually.")
+                    else:
+                        print(f"ℹ️ Stop Loss already filled or cancelled.")
+                    
+                    print(f"\n🎉 Trade completed successfully - All profits taken!")
+                    print(f"{'='*60}")
+                    # Remove from active monitors
+                    self._remove_monitor(symbol, sl_order_id)
+                    monitoring = False
+                    break
+                
+                # Scenario 2: Stop Loss filled - Cancel remaining TPs
+                if sl_filled:
+                    print(f"\n\n{'='*60}")
+                    print(f"❌ Stop Loss was triggered!")
+                    print(f"{'='*60}")
+                    print(f"Remaining TPs: {len(active_tp_ids)}")
+                    
+                    if active_tp_ids:
+                        print(f"Canceling remaining TP orders...")
+                        for tp_id in active_tp_ids:
+                            cancel_result = self.cancel_order(symbol, tp_id)
+                            if cancel_result:
+                                print(f"✓ TP order {tp_id} cancelled")
+                            else:
+                                print(f"⚠️ Warning: Failed to cancel TP {tp_id}")
+                    
+                    print(f"\n⚠️ Trade stopped out.")
+                    print(f"{'='*60}")
+                    # Remove from active monitors
+                    self._remove_monitor(symbol, sl_order_id)
+                    monitoring = False
+                    break
+                
+                # Scenario 3: All orders filled or cancelled (edge case)
+                # If SL is not active and no TPs are active, monitoring is complete
+                if not sl_active and len(active_tp_ids) == 0:
+                    print(f"\n\n{'='*60}")
+                    if filled_tps == 4:
+                        print(f"ℹ️ All Take Profits filled and Stop Loss handled.")
+                    else:
+                        print(f"ℹ️ All orders have been filled or cancelled.")
+                    print(f"{'='*60}")
+                    # Remove from active monitors
+                    self._remove_monitor(symbol, sl_order_id)
+                    monitoring = False
+                    break
+                
+                # Continue monitoring
+                time.sleep(check_interval)
+                
+            except KeyboardInterrupt:
+                print(f"\n\n🛑 Monitoring stopped by user.")
+                print(f"⚠️  IMPORTANT: Orders are still active on Binance!")
+                print(f"   You may need to manually manage them.")
+                # Remove from active monitors
+                self._remove_monitor(symbol, sl_order_id)
+                monitoring = False
+                break
+            except Exception as e:
+                print(f"\n⚠️ Error during monitoring: {e}")
+                print(f"Continuing to monitor...")
+                time.sleep(check_interval)
+    
+    def _update_monitor_status(self, symbol, sl_order_id, filled_tps, sl_active, sl_filled):
+        """Update status information for a monitor"""
+        for monitor in self.active_monitors:
+            if monitor['symbol'] == symbol and monitor['sl_order_id'] == sl_order_id:
+                monitor['status']['filled_tps'] = filled_tps
+                if sl_filled:
+                    monitor['status']['sl_status'] = 'Filled'
+                elif sl_active:
+                    monitor['status']['sl_status'] = 'Active'
+                else:
+                    monitor['status']['sl_status'] = 'Cancelled/Unknown'
+                monitor['status']['last_update'] = time.time()
+                break
+    
+    def _remove_monitor(self, symbol, sl_order_id):
+        """Remove completed monitor from active monitors list"""
+        self.active_monitors = [
+            m for m in self.active_monitors 
+            if not (m['symbol'] == symbol and m['sl_order_id'] == sl_order_id)
+        ]
+    
+    def get_active_monitors(self):
+        """Get list of active monitoring threads with basic info"""
+        return [
+            {
+                'symbol': m['symbol'],
+                'sl_order_id': m['sl_order_id'],
+                'tp_order_ids': m['tp_order_ids'],
+                'thread_alive': m['thread'].is_alive(),
+                'runtime': int(time.time() - m['started_at'])
+            }
+            for m in self.active_monitors
+        ]
+    
+    def get_monitor_status(self, symbol=None, sl_order_id=None):
+        """
+        Get detailed status of monitoring threads
+        
+        Args:
+            symbol (str, optional): Filter by symbol
+            sl_order_id (int, optional): Filter by SL order ID
+            
+        Returns:
+            list: List of monitor status dictionaries
+        """
+        monitors = self.active_monitors
+        if symbol:
+            monitors = [m for m in monitors if m['symbol'] == symbol]
+        if sl_order_id:
+            monitors = [m for m in monitors if m['sl_order_id'] == sl_order_id]
+        
+        result = []
+        for m in monitors:
+            status = m.get('status', {})
+            result.append({
+                'symbol': m['symbol'],
+                'sl_order_id': m['sl_order_id'],
+                'tp_order_ids': m['tp_order_ids'],
+                'filled_tps': status.get('filled_tps', 0),
+                'total_tps': status.get('total_tps', 4),
+                'sl_status': status.get('sl_status', 'Unknown'),
+                'thread_alive': m['thread'].is_alive(),
+                'runtime_seconds': int(time.time() - m['started_at']),
+                'last_update': status.get('last_update', m['started_at'])
+            })
+        
+        return result
+    
     def execute_trade(self, symbol, direction, leverage, entry_price, quantity, 
                       stop_loss_price, tp1_price, tp2_price, tp3_price, tp4_price, 
-                      wait_timeout=300):
+                      wait_timeout=300, auto_monitor=False):
         """
         Execute complete trade with entry, stop loss, and 4 take profits
         
@@ -319,6 +527,7 @@ class BinanceFuturesTrader:
             stop_loss_price (float): Stop loss price
             tp1_price, tp2_price, tp3_price, tp4_price (float): Take profit prices
             wait_timeout (int): Seconds to wait for entry order to fill (default 300s = 5min)
+            auto_monitor (bool): Automatically start monitoring in background (default False)
         """
         print(f"\n{'='*60}")
         print(f"EXECUTING TRADE FOR {symbol}")
@@ -398,25 +607,80 @@ class BinanceFuturesTrader:
         
         # Step 5: Place Stop Loss
         print(f"\n[5/7] Placing Stop Loss at {stop_loss_price}...")
-        if not self.place_stop_loss(symbol, close_side, stop_loss_price, quantity):
+        sl_result = self.place_stop_loss(symbol, close_side, stop_loss_price, quantity)
+        if not sl_result:
             print("⚠️ Warning: Stop loss placement failed!")
             print("   IMPORTANT: You should manually set a stop loss on Binance!")
+            return False
+        
+        sl_order_id = sl_result.get('orderId')
         
         # Step 6-9: Place 4 Take Profits
         tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
+        tp_order_ids = []
+        
         for i, tp_price in enumerate(tp_prices, 1):
             print(f"\n[{5+i}/9] Placing Take Profit {i} at {tp_price}...")
-            if not self.place_take_profit(symbol, close_side, tp_price, tp_quantity):
+            tp_result = self.place_take_profit(symbol, close_side, tp_price, tp_quantity)
+            if not tp_result:
                 print(f"⚠️ Warning: Take Profit {i} placement failed!")
+            else:
+                tp_order_ids.append(tp_result.get('orderId'))
+        
+        if len(tp_order_ids) == 0:
+            print("\n❌ No take profit orders were placed successfully!")
+            print("   Canceling stop loss...")
+            self.cancel_order(symbol, sl_order_id)
+            return False
         
         print(f"\n{'='*60}")
         print(f"✓ TRADE EXECUTION COMPLETE")
         print(f"{'='*60}")
         print(f"Position: {direction} {quantity} {symbol} @ {leverage}x leverage")
         print(f"Entry Price: {entry_price}")
-        print(f"Stop Loss: {stop_loss_price}")
+        print(f"Stop Loss: {stop_loss_price} (Order ID: {sl_order_id})")
         print(f"Take Profits: {tp1_price}, {tp2_price}, {tp3_price}, {tp4_price}")
         print(f"Each TP closes: {tp_quantity} ({symbol})")
+        print(f"TP Order IDs: {tp_order_ids}")
+        
+        # Ask if user wants to monitor orders (skip prompt if auto_monitor is True)
+        if auto_monitor:
+            monitor = 'yes'
+        else:
+            monitor = input("\nStart automatic order monitoring? (yes/no): ").strip().lower()
+        
+        if monitor == 'yes':
+            # Start monitoring in a background thread so user can continue trading
+            monitor_thread = threading.Thread(
+                target=self.monitor_and_manage_orders,
+                args=(symbol, sl_order_id, tp_order_ids),
+                daemon=True,
+                name=f"Monitor-{symbol}-{sl_order_id}"
+            )
+            monitor_thread.start()
+            
+            # Store thread info for tracking
+            monitor_info = {
+                'thread': monitor_thread,
+                'symbol': symbol,
+                'sl_order_id': sl_order_id,
+                'tp_order_ids': tp_order_ids,
+                'started_at': time.time(),
+                'status': {
+                    'filled_tps': 0,
+                    'total_tps': 4,
+                    'sl_status': 'Active',
+                    'last_update': time.time()
+                }
+            }
+            self.active_monitors.append(monitor_info)
+            
+            print(f"\n✓ Monitoring started in background thread")
+            print(f"  You can now place new orders while monitoring continues...")
+            print(f"  Active monitors: {len(self.active_monitors)}")
+        else:
+            print("\n⚠️  IMPORTANT: Stop Loss will NOT auto-cancel when TPs fill!")
+            print("   You'll need to manually cancel it or run monitoring later.")
         
         return True
 
@@ -465,10 +729,10 @@ def main():
         
         leverage = int(input("Enter leverage (1-125): ").strip())
         
-        entry_price = float(input("Enter LIMIT order entry price: ").strip())
+        entry_price = float(input("Enter LIMIT entry price: ").strip())
         quantity = float(input("Enter quantity to trade: ").strip())
-        wait_timeout = int(input("Enter wait timeout in seconds for order to fill (e.g., 300 for 5min): ").strip())
-        print("   Note: Bot will wait for limit order to fill before placing SL/TP orders")
+        
+        wait_timeout = int(input("Enter wait timeout in seconds (e.g., 300 for 5min): ").strip())
         
         stop_loss_price = float(input("Enter Stop Loss price: ").strip())
         
@@ -485,11 +749,10 @@ def main():
         print(f"Symbol: {symbol}")
         print(f"Direction: {direction}")
         print(f"Leverage: {leverage}x")
+        print(f"Entry Price (LIMIT): {entry_price}")
         print(f"Quantity: {quantity}")
-        print(f"Entry Price (LIMIT ORDER): {entry_price}")
-        print(f"Wait Timeout: {wait_timeout} seconds (for order to fill)")
-        print(f"\n⚠️  IMPORTANT: SL/TP orders will be placed AFTER limit order fills")
-        print(f"\nStop Loss: {stop_loss_price}")
+        print(f"Wait Timeout: {wait_timeout} seconds")
+        print(f"Stop Loss: {stop_loss_price}")
         print(f"Take Profit 1 (25%): {tp1_price}")
         print(f"Take Profit 2 (25%): {tp2_price}")
         print(f"Take Profit 3 (25%): {tp3_price}")
