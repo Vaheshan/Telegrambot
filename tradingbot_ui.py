@@ -21,7 +21,7 @@ class TradingBotUI:
         self.root.title("Binance Futures Trading Bot")
 
         # Use a simple, compact layout
-        self.root.geometry("600x600")
+        self.root.geometry("600x650")
         self.root.resizable(False, False)
 
         main_frame = ttk.Frame(self.root, padding=10)
@@ -72,7 +72,7 @@ class TradingBotUI:
         row += 1
 
         # Entry price
-        ttk.Label(main_frame, text="Entry price (info only):").grid(row=row, column=0, sticky="w", pady=2)
+        ttk.Label(main_frame, text="LIMIT order entry price:").grid(row=row, column=0, sticky="w", pady=2)
         self.entry_price_var = tk.StringVar()
         ttk.Entry(main_frame, textvariable=self.entry_price_var).grid(row=row, column=1, sticky="ew", pady=2)
         row += 1
@@ -82,6 +82,14 @@ class TradingBotUI:
         self.quantity_var = tk.StringVar()
         ttk.Entry(main_frame, textvariable=self.quantity_var).grid(row=row, column=1, sticky="ew", pady=2)
         row += 1
+
+        # Wait timeout
+        ttk.Label(main_frame, text="Wait timeout (seconds):").grid(row=row, column=0, sticky="w", pady=2)
+        self.wait_timeout_var = tk.StringVar(value="300")
+        ttk.Entry(main_frame, textvariable=self.wait_timeout_var).grid(row=row, column=1, sticky="ew", pady=2)
+        ttk.Label(main_frame, text="(Time to wait for limit order to fill before placing SL/TP)", 
+                  font=("TkDefaultFont", 7), foreground="gray").grid(row=row+1, column=1, sticky="w", pady=0)
+        row += 2
 
         # Stop loss
         ttk.Label(main_frame, text="Stop Loss price:").grid(row=row, column=0, sticky="w", pady=2)
@@ -183,6 +191,7 @@ class TradingBotUI:
             leverage = int(self.leverage_var.get().strip())
             entry_price = float(self.entry_price_var.get().strip())
             quantity = float(self.quantity_var.get().strip())
+            wait_timeout = int(self.wait_timeout_var.get().strip())
             stop_loss_price = float(self.sl_var.get().strip())
             tp1_price = float(self.tp1_var.get().strip())
             tp2_price = float(self.tp2_var.get().strip())
@@ -196,7 +205,9 @@ class TradingBotUI:
             self.append_log(f"Direction: {direction}")
             self.append_log(f"Leverage: {leverage}x")
             self.append_log(f"Quantity: {quantity}")
-            self.append_log(f"Entry price (info): {entry_price}")
+            self.append_log(f"Entry price (LIMIT ORDER): {entry_price}")
+            self.append_log(f"Wait timeout: {wait_timeout} seconds")
+            self.append_log(f"⚠️ SL/TP orders will be placed AFTER limit order fills")
             self.append_log(f"Stop Loss: {stop_loss_price}")
             self.append_log(f"TP1: {tp1_price}, TP2: {tp2_price}, TP3: {tp3_price}, TP4: {tp4_price}")
             self.append_log("Executing trade...")
@@ -225,6 +236,7 @@ class TradingBotUI:
                 tp2_price=tp2_price,
                 tp3_price=tp3_price,
                 tp4_price=tp4_price,
+                wait_timeout=wait_timeout
             )
 
             if success:
