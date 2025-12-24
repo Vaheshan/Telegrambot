@@ -20,11 +20,11 @@ SL_END = 5.0     # End at 5.0%
 SL_STEP = 0.10   # Increment by 0.10%
 
 # Time windows to evaluate (in hours)
-TIME_WINDOWS = [4, 8, 12]
+TIME_WINDOWS = [12]  # Only 12h window
 
 # Trading parameters
 LEVERAGE = 1  # No leverage for spot-like trading
-POSITION_SIZE_USDT = 100  # Default position size in USDT per trade
+POSITION_SIZE_USDT = 50  # Position size in USDT per trade
 
 # Data download settings
 BINANCE_FUTURES_BASE_URL = "https://fapi.binance.com"
