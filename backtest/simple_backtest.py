@@ -100,11 +100,24 @@ def main():
         current_balance = STARTING_BALANCE
         
         results = []
+        signal_updates = 0
+        last_signal_time = {}  # Track last signal time per symbol for update detection
         
         # Process signals sequentially in chronological order for proper balance tracking
         for idx, signal in tqdm(signals_df.iterrows(), total=len(signals_df), desc=f"Backtesting {hours_window}h", ncols=100):
+            symbol = signal['symbol']
+            signal_time = signal['datetime']
+            
+            # Check for signal update (new signal for same symbol within time window)
+            if symbol in last_signal_time:
+                time_diff = (signal_time - last_signal_time[symbol]).total_seconds() / 3600  # hours
+                if time_diff <= hours_window:
+                    signal_updates += 1
+            
+            last_signal_time[symbol] = signal_time
+            
             # Check if we have enough balance to trade
-            if current_balance < 100:  # POSITION_SIZE_USDT = 100
+            if current_balance < 50:  # POSITION_SIZE_USDT = 50
                 # Not enough balance, record as skipped
                 results.append({
                     'status': 'insufficient_balance',
@@ -189,6 +202,7 @@ def main():
         print(f"Return: {(total_pnl / STARTING_BALANCE * 100):.2f}%")
         
         print(f"\nTotal signals: {len(signals_df)}")
+        print(f"Signal updates detected: {signal_updates} (within {hours_window}h window)")
         print(f"Entries filled: {len(completed)} ({len(completed)/len(signals_df)*100:.1f}%)")
         if insufficient_balance_count > 0:
             print(f"Skipped (insufficient balance): {insufficient_balance_count}")
