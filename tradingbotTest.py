@@ -95,7 +95,7 @@ class BinanceFuturesTrader:
                     return pos
         return None
     
-    def place_market_order(self, symbol, side, quantity, position_side="BOTH"):
+    def place_market_order(self, symbol, side, quantity, position_side="BOTH", price=None):
         """
         Place a market order
         
@@ -109,9 +109,11 @@ class BinanceFuturesTrader:
         params = {
             'symbol': symbol,
             'side': side,
-            'type': 'MARKET',
+            'type': 'LIMIT',
             'quantity': quantity,
-            'positionSide': position_side
+            'positionSide': position_side,
+            'timeInForce': 'GTC',
+            'price': price
         }
         
         result = self._make_request("POST", endpoint, params)
@@ -119,6 +121,103 @@ class BinanceFuturesTrader:
             print(f"✓ Market order placed: {side} {quantity} {symbol}")
             return result
         return None
+
+    def place_limit_order(self, symbol, side, quantity, price, position_side="BOTH"):
+        """
+        Place a limit order
+        
+        Args:
+            symbol (str): Trading pair
+            side (str): 'BUY' or 'SELL'
+            quantity (float): Order quantity
+            price (float): Limit order price
+            position_side (str): 'BOTH', 'LONG', or 'SHORT' (for hedge mode)
+        """
+        endpoint = "/fapi/v1/order"
+        params = {
+            'symbol': symbol,
+            'side': side,
+            'type': 'LIMIT',
+            'quantity': quantity,
+            'positionSide': position_side,
+            'timeInForce': 'GTC',
+            'price': price
+        }
+        
+        result = self._make_request("POST", endpoint, params)
+        if result:
+            print(f"✓ Limit order placed: {side} {quantity} {symbol} at {price}")
+            return result
+        return None
+
+    def cancel_order(self, symbol, order_id):
+        """Cancel an open order"""
+        endpoint = "/fapi/v1/order"
+        params = {
+            'symbol': symbol,
+            'orderId': order_id
+        }
+        
+        result = self._make_request("DELETE", endpoint, params)
+        if result:
+            print(f"✓ Order {order_id} cancelled")
+            return result
+        return None
+
+    def check_order_status(self, symbol, order_id):
+        """Check if order is filled"""
+        endpoint = "/fapi/v1/order"
+        params = {
+            'symbol': symbol,
+            'orderId': order_id
+        }
+        
+        result = self._make_request("GET", endpoint, params)
+        return result
+    
+    def wait_for_order_fill(self, symbol, order_id, timeout_seconds):
+        """
+        Wait for order to fill, cancel if timeout
+        
+        Args:
+            symbol (str): Trading pair
+            order_id (int): Order ID to monitor
+            timeout_seconds (int): How long to wait before canceling
+            
+        Returns:
+            bool: True if filled, False if cancelled/failed
+        """
+        print(f"\n⏳ Waiting up to {timeout_seconds} seconds for order to fill...")
+        
+        start_time = time.time()
+        check_interval = 2  # Check every 2 seconds
+        
+        while time.time() - start_time < timeout_seconds:
+            elapsed = int(time.time() - start_time)
+            remaining = timeout_seconds - elapsed
+            print(f"   Checking order status... ({remaining}s remaining)", end='\r')
+            
+            order_status = self.check_order_status(symbol, order_id)
+            
+            if order_status:
+                status = order_status.get('status')
+                
+                if status == 'FILLED':
+                    filled_qty = order_status.get('executedQty')
+                    avg_price = order_status.get('avgPrice')
+                    print(f"\n✓ Order FILLED! Quantity: {filled_qty}, Avg Price: {avg_price}")
+                    return True
+                
+                elif status in ['CANCELED', 'REJECTED', 'EXPIRED']:
+                    print(f"\n❌ Order {status}")
+                    return False
+            
+            time.sleep(check_interval)
+        
+        # Timeout reached - cancel the order
+        print(f"\n⏰ Timeout reached ({timeout_seconds}s). Canceling order...")
+        self.cancel_order(symbol, order_id)
+        return False
     
     def place_stop_loss(self, symbol, side, stop_price, quantity, position_side="BOTH"):
         """
@@ -200,8 +299,14 @@ class BinanceFuturesTrader:
         precision = len(str(step_size).rstrip('0').split('.')[-1])
         return round(quantity, precision)
     
+    def round_price(self, price, tick_size):
+        """Round price to match exchange precision"""
+        precision = len(str(tick_size).rstrip('0').split('.')[-1])
+        return round(price, precision)
+
     def execute_trade(self, symbol, direction, leverage, entry_price, quantity, 
-                      stop_loss_price, tp1_price, tp2_price, tp3_price, tp4_price):
+                      stop_loss_price, tp1_price, tp2_price, tp3_price, tp4_price, 
+                      wait_timeout=300):
         """
         Execute complete trade with entry, stop loss, and 4 take profits
         
@@ -209,10 +314,11 @@ class BinanceFuturesTrader:
             symbol (str): Trading pair (e.g., 'BTCUSDT')
             direction (str): 'LONG' or 'SHORT'
             leverage (int): Leverage (1-125)
-            entry_price (float): Entry price (for info, uses MARKET)
+            entry_price (float): Limit order entry price
             quantity (float): Total position size
             stop_loss_price (float): Stop loss price
             tp1_price, tp2_price, tp3_price, tp4_price (float): Take profit prices
+            wait_timeout (int): Seconds to wait for entry order to fill (default 300s = 5min)
         """
         print(f"\n{'='*60}")
         print(f"EXECUTING TRADE FOR {symbol}")
@@ -225,27 +331,64 @@ class BinanceFuturesTrader:
             return False
         
         # Find quantity precision
-        quantity_precision = None
+        step_size = None
         for filter in symbol_info['filters']:
             if filter['filterType'] == 'LOT_SIZE':
                 step_size = float(filter['stepSize'])
                 quantity = self.round_quantity(quantity, step_size)
                 break
         
+        # Find price precision
+        price_precision = None
+        for filter in symbol_info['filters']:
+            if filter['filterType'] == 'PRICE_FILTER':
+                tick_size = float(filter['tickSize'])
+                # Round all prices to proper precision
+                entry_price = self.round_price(entry_price, tick_size)
+                stop_loss_price = self.round_price(stop_loss_price, tick_size)
+                tp1_price = self.round_price(tp1_price, tick_size)
+                tp2_price = self.round_price(tp2_price, tick_size)
+                tp3_price = self.round_price(tp3_price, tick_size)
+                tp4_price = self.round_price(tp4_price, tick_size)
+                break
+        
         # Step 1: Set leverage
-        print(f"\n[1/6] Setting leverage to {leverage}x...")
+        print(f"\n[1/7] Setting leverage to {leverage}x...")
         if not self.set_leverage(symbol, leverage):
             return False
         
-        # Step 2: Place entry order
-        print(f"\n[2/6] Placing {direction} entry order...")
+        # Step 2: Place LIMIT entry order
+        print(f"\n[2/7] Placing {direction} LIMIT entry order at {entry_price}...")
         entry_side = 'BUY' if direction == 'LONG' else 'SELL'
-        entry_order = self.place_market_order(symbol, entry_side, quantity)
+        entry_order = self.place_limit_order(symbol, entry_side, quantity, entry_price)
+        
         if not entry_order:
+            print("❌ Failed to place entry order")
             return False
         
-        # Wait a moment for order to fill
-        time.sleep(2)
+        order_id = entry_order.get('orderId')
+        print(f"   Order ID: {order_id}")
+        
+        # Step 3: Wait for order to fill
+        print(f"\n[3/7] Waiting for order to fill (timeout: {wait_timeout}s)...")
+        order_filled = self.wait_for_order_fill(symbol, order_id, wait_timeout)
+        
+        if not order_filled:
+            print("\n❌ Entry order was not filled within timeout period")
+            print("   Trade cancelled. No positions opened.")
+            return False
+        
+        # Step 4: Verify position exists
+        print(f"\n[4/7] Verifying position created...")
+        time.sleep(2)  # Small delay to ensure position is registered
+        position = self.get_position_info(symbol)
+        
+        if not position or float(position['positionAmt']) == 0:
+            print("⚠️  Warning: Position not found after order fill!")
+            print("   This might be a system delay. Check Binance manually.")
+            return False
+        
+        print(f"✓ Position confirmed: {position['positionAmt']} {symbol}")
         
         # Calculate TP quantities (25% each)
         tp_quantity = self.round_quantity(quantity * 0.25, step_size)
@@ -253,15 +396,16 @@ class BinanceFuturesTrader:
         # Determine close side (opposite of entry)
         close_side = 'SELL' if direction == 'LONG' else 'BUY'
         
-        # Step 3: Place Stop Loss
-        print(f"\n[3/6] Placing Stop Loss at {stop_loss_price}...")
+        # Step 5: Place Stop Loss
+        print(f"\n[5/7] Placing Stop Loss at {stop_loss_price}...")
         if not self.place_stop_loss(symbol, close_side, stop_loss_price, quantity):
             print("⚠️ Warning: Stop loss placement failed!")
+            print("   IMPORTANT: You should manually set a stop loss on Binance!")
         
-        # Step 4-7: Place 4 Take Profits
+        # Step 6-9: Place 4 Take Profits
         tp_prices = [tp1_price, tp2_price, tp3_price, tp4_price]
         for i, tp_price in enumerate(tp_prices, 1):
-            print(f"\n[{3+i}/6] Placing Take Profit {i} at {tp_price}...")
+            print(f"\n[{5+i}/9] Placing Take Profit {i} at {tp_price}...")
             if not self.place_take_profit(symbol, close_side, tp_price, tp_quantity):
                 print(f"⚠️ Warning: Take Profit {i} placement failed!")
         
@@ -269,6 +413,7 @@ class BinanceFuturesTrader:
         print(f"✓ TRADE EXECUTION COMPLETE")
         print(f"{'='*60}")
         print(f"Position: {direction} {quantity} {symbol} @ {leverage}x leverage")
+        print(f"Entry Price: {entry_price}")
         print(f"Stop Loss: {stop_loss_price}")
         print(f"Take Profits: {tp1_price}, {tp2_price}, {tp3_price}, {tp4_price}")
         print(f"Each TP closes: {tp_quantity} ({symbol})")
@@ -320,8 +465,10 @@ def main():
         
         leverage = int(input("Enter leverage (1-125): ").strip())
         
-        entry_price = float(input("Enter entry price (for reference): ").strip())
+        entry_price = float(input("Enter LIMIT order entry price: ").strip())
         quantity = float(input("Enter quantity to trade: ").strip())
+        wait_timeout = int(input("Enter wait timeout in seconds for order to fill (e.g., 300 for 5min): ").strip())
+        print("   Note: Bot will wait for limit order to fill before placing SL/TP orders")
         
         stop_loss_price = float(input("Enter Stop Loss price: ").strip())
         
@@ -339,8 +486,10 @@ def main():
         print(f"Direction: {direction}")
         print(f"Leverage: {leverage}x")
         print(f"Quantity: {quantity}")
-        print(f"Entry Price: {entry_price}")
-        print(f"Stop Loss: {stop_loss_price}")
+        print(f"Entry Price (LIMIT ORDER): {entry_price}")
+        print(f"Wait Timeout: {wait_timeout} seconds (for order to fill)")
+        print(f"\n⚠️  IMPORTANT: SL/TP orders will be placed AFTER limit order fills")
+        print(f"\nStop Loss: {stop_loss_price}")
         print(f"Take Profit 1 (25%): {tp1_price}")
         print(f"Take Profit 2 (25%): {tp2_price}")
         print(f"Take Profit 3 (25%): {tp3_price}")
@@ -360,7 +509,8 @@ def main():
                 tp1_price=tp1_price,
                 tp2_price=tp2_price,
                 tp3_price=tp3_price,
-                tp4_price=tp4_price
+                tp4_price=tp4_price,
+                wait_timeout=wait_timeout
             )
         else:
             print("\n❌ Trade cancelled")
