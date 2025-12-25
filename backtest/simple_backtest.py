@@ -14,7 +14,8 @@ from config_backtest import (
     RESULTS_OUTPUT_DIR,
     DEFAULT_TP_PERCENT,
     DEFAULT_SL_PERCENT,
-    TIME_WINDOWS
+    TIME_WINDOWS,
+    MAX_CONCURRENT_POSITIONS
 )
 
 
@@ -103,6 +104,9 @@ def main():
         signal_updates = 0
         last_signal_time = {}  # Track last signal time per symbol for update detection
         
+        # Track open positions for concurrent position limit
+        open_positions = {}  # {symbol: {'entry_time': datetime, 'signal_index': idx}}
+        
         # Process signals sequentially in chronological order for proper balance tracking
         for idx, signal in tqdm(signals_df.iterrows(), total=len(signals_df), desc=f"Backtesting {hours_window}h", ncols=100):
             symbol = signal['symbol']
@@ -115,6 +119,20 @@ def main():
                     signal_updates += 1
             
             last_signal_time[symbol] = signal_time
+            
+            # Check if we've reached max concurrent positions limit
+            if len(open_positions) >= MAX_CONCURRENT_POSITIONS:
+                # Check if any open positions have closed by this time
+                # (positions close when their trade completes)
+                # We'll mark positions as closed after processing results
+                results.append({
+                    'status': 'max_positions_reached',
+                    'symbol': signal['symbol'],
+                    'side': signal['side'],
+                    'signal_index': idx,
+                    'open_positions_count': len(open_positions)
+                })
+                continue
             
             # Check if we have enough balance to trade
             if current_balance < 50:  # POSITION_SIZE_USDT = 50
@@ -134,6 +152,18 @@ def main():
                 
                 # Update balance based on result
                 if result.get('status') == 'completed' and result.get('entry_hit'):
+                    # Add to open positions when entry is hit
+                    entry_time = result.get('entry_time')
+                    if entry_time:
+                        open_positions[symbol] = {'entry_time': entry_time, 'signal_index': idx}
+                    
+                    # Calculate when position closes
+                    exit_time = result.get('exit_time')
+                    
+                    # Remove from open positions when trade exits
+                    if exit_time and symbol in open_positions:
+                        del open_positions[symbol]
+                    
                     pnl = result.get('pnl', 0)
                     current_balance += pnl
                     result['balance_after_trade'] = current_balance
@@ -198,6 +228,9 @@ def main():
         # Count insufficient balance cases
         insufficient_balance_count = len(results_df[results_df['status'] == 'insufficient_balance'])
         
+        # Count max positions reached cases
+        max_positions_count = len(results_df[results_df['status'] == 'max_positions_reached'])
+        
         print(f"\n{'='*60}")
         print(f"RESULTS - {hours_window}-hour window")
         print(f"{'='*60}")
@@ -211,6 +244,8 @@ def main():
         print(f"Entries filled: {len(completed)} ({len(completed)/len(signals_df)*100:.1f}%)")
         if insufficient_balance_count > 0:
             print(f"Skipped (insufficient balance): {insufficient_balance_count}")
+        if max_positions_count > 0:
+            print(f"Skipped (max {MAX_CONCURRENT_POSITIONS} positions reached): {max_positions_count}")
         
         print(f"\nOVERALL STATS:")
         print(f"Wins: {len(wins)} ({len(wins)/len(completed)*100:.1f}%)")
