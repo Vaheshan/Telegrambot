@@ -14,7 +14,8 @@ from config_backtest import (
     RESULTS_OUTPUT_DIR,
     DEFAULT_TP_PERCENT,
     DEFAULT_SL_PERCENT,
-    TIME_WINDOWS
+    TIME_WINDOWS,
+    MAX_CONCURRENT_POSITIONS
 )
 
 
@@ -103,6 +104,9 @@ def main():
         signal_updates = 0
         last_signal_time = {}  # Track last signal time per symbol for update detection
         
+        # Track open positions for concurrent position limit
+        open_positions = {}  # {symbol: {'entry_time': datetime, 'signal_index': idx}}
+        
         # Process signals sequentially in chronological order for proper balance tracking
         for idx, signal in tqdm(signals_df.iterrows(), total=len(signals_df), desc=f"Backtesting {hours_window}h", ncols=100):
             symbol = signal['symbol']
@@ -115,6 +119,20 @@ def main():
                     signal_updates += 1
             
             last_signal_time[symbol] = signal_time
+            
+            # Check if we've reached max concurrent positions limit
+            if len(open_positions) >= MAX_CONCURRENT_POSITIONS:
+                # Check if any open positions have closed by this time
+                # (positions close when their trade completes)
+                # We'll mark positions as closed after processing results
+                results.append({
+                    'status': 'max_positions_reached',
+                    'symbol': signal['symbol'],
+                    'side': signal['side'],
+                    'signal_index': idx,
+                    'open_positions_count': len(open_positions)
+                })
+                continue
             
             # Check if we have enough balance to trade
             if current_balance < 50:  # POSITION_SIZE_USDT = 50
@@ -134,6 +152,18 @@ def main():
                 
                 # Update balance based on result
                 if result.get('status') == 'completed' and result.get('entry_hit'):
+                    # Add to open positions when entry is hit
+                    entry_time = result.get('entry_time')
+                    if entry_time:
+                        open_positions[symbol] = {'entry_time': entry_time, 'signal_index': idx}
+                    
+                    # Calculate when position closes
+                    exit_time = result.get('exit_time')
+                    
+                    # Remove from open positions when trade exits
+                    if exit_time and symbol in open_positions:
+                        del open_positions[symbol]
+                    
                     pnl = result.get('pnl', 0)
                     current_balance += pnl
                     result['balance_after_trade'] = current_balance
@@ -184,6 +214,11 @@ def main():
         avg_win = wins['pnl'].mean() if len(wins) > 0 else 0
         avg_loss = losses['pnl'].mean() if len(losses) > 0 else 0
         
+        # Calculate Expectancy: (Win Rate * Avg Win) - (Loss Rate * Avg Loss)
+        win_rate_decimal = len(wins) / len(completed) if len(completed) > 0 else 0
+        loss_rate_decimal = len(losses) / len(completed) if len(completed) > 0 else 0
+        expectancy = (win_rate_decimal * avg_win) - (loss_rate_decimal * abs(avg_loss))
+        
         profit_factor = abs(wins['pnl'].sum() / losses['pnl'].sum()) if len(losses) > 0 and losses['pnl'].sum() != 0 else 0
         
         # Statistics by source (CSV vs defaults)
@@ -192,6 +227,9 @@ def main():
         
         # Count insufficient balance cases
         insufficient_balance_count = len(results_df[results_df['status'] == 'insufficient_balance'])
+        
+        # Count max positions reached cases
+        max_positions_count = len(results_df[results_df['status'] == 'max_positions_reached'])
         
         print(f"\n{'='*60}")
         print(f"RESULTS - {hours_window}-hour window")
@@ -206,6 +244,8 @@ def main():
         print(f"Entries filled: {len(completed)} ({len(completed)/len(signals_df)*100:.1f}%)")
         if insufficient_balance_count > 0:
             print(f"Skipped (insufficient balance): {insufficient_balance_count}")
+        if max_positions_count > 0:
+            print(f"Skipped (max {MAX_CONCURRENT_POSITIONS} positions reached): {max_positions_count}")
         
         print(f"\nOVERALL STATS:")
         print(f"Wins: {len(wins)} ({len(wins)/len(completed)*100:.1f}%)")
@@ -214,15 +254,28 @@ def main():
         print(f"Win Rate: {win_rate:.2f}%")
         print(f"Average Win: ${avg_win:.2f}")
         print(f"Average Loss: ${avg_loss:.2f}")
+        print(f"Expectancy: ${expectancy:.2f} per trade")
         print(f"Profit Factor: {profit_factor:.2f}")
         
         print(f"\nLONG TRADES ({len(long_trades)} total):")
         print(f"Wins: {len(long_wins)} | Losses: {len(long_losses)} | Expired: {len(long_expired)}")
-        print(f"Win Rate: {len(long_wins)/len(long_trades)*100:.1f}% | PnL: ${long_trades['pnl'].sum():.2f}")
+        long_wr = len(long_wins)/len(long_trades)*100 if len(long_trades) > 0 else 0
+        long_pnl = long_trades['pnl'].sum()
+        long_avg_win = long_wins['pnl'].mean() if len(long_wins) > 0 else 0
+        long_avg_loss = long_losses['pnl'].mean() if len(long_losses) > 0 else 0
+        long_expectancy = (len(long_wins)/len(long_trades)*long_avg_win) - (len(long_losses)/len(long_trades)*abs(long_avg_loss)) if len(long_trades) > 0 else 0
+        print(f"Win Rate: {long_wr:.1f}% | PnL: ${long_pnl:.2f}")
+        print(f"Expectancy: ${long_expectancy:.2f} per trade")
         
         print(f"\nSHORT TRADES ({len(short_trades)} total):")
         print(f"Wins: {len(short_wins)} | Losses: {len(short_losses)} | Expired: {len(short_expired)}")
-        print(f"Win Rate: {len(short_wins)/len(short_trades)*100:.1f}% | PnL: ${short_trades['pnl'].sum():.2f}")
+        short_wr = len(short_wins)/len(short_trades)*100 if len(short_trades) > 0 else 0
+        short_pnl = short_trades['pnl'].sum()
+        short_avg_win = short_wins['pnl'].mean() if len(short_wins) > 0 else 0
+        short_avg_loss = short_losses['pnl'].mean() if len(short_losses) > 0 else 0
+        short_expectancy = (len(short_wins)/len(short_trades)*short_avg_win) - (len(short_losses)/len(short_trades)*abs(short_avg_loss)) if len(short_trades) > 0 else 0
+        print(f"Win Rate: {short_wr:.1f}% | PnL: ${short_pnl:.2f}")
+        print(f"Expectancy: ${short_expectancy:.2f} per trade")
         
         if len(csv_trades) > 0:
             csv_win_rate = len(csv_trades[csv_trades['result'] == 'win']) / len(csv_trades) * 100

@@ -8,7 +8,7 @@ BINANCE_API_SECRET = ""  # Fill this in
 
 # Default TP/SL percentages when not provided in CSV
 DEFAULT_TP_PERCENT = 2.0  # 2%
-DEFAULT_SL_PERCENT = 5.0  # 5%
+DEFAULT_SL_PERCENT = 5  # 5%
 
 # TP/SL Testing Range
 TP_START = 0.10  # Start at 0.10%
@@ -23,8 +23,9 @@ SL_STEP = 0.10   # Increment by 0.10%
 TIME_WINDOWS = [12]  # Only 12h window
 
 # Trading parameters
-LEVERAGE = 1  # No leverage for spot-like trading
+LEVERAGE = 1  # Leverage for futures trading (1x = no leverage)
 POSITION_SIZE_USDT = 50  # Position size in USDT per trade
+MAX_CONCURRENT_POSITIONS = 5  # Maximum number of positions open at once
 
 # Data download settings
 BINANCE_FUTURES_BASE_URL = "https://fapi.binance.com"

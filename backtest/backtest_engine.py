@@ -188,7 +188,7 @@ class SignalBacktester:
                 else:
                     pnl_percent = ((entry_price - exit_price) / entry_price) * 100 * remaining_position
                 
-                pnl = pnl_percent * POSITION_SIZE_USDT / 100
+                pnl = pnl_percent * POSITION_SIZE_USDT * LEVERAGE / 100
                 total_pnl += pnl
                 
                 return {
@@ -218,7 +218,7 @@ class SignalBacktester:
                         pnl_percent = ((current_sl - entry_price) / entry_price) * 100 * remaining_position
                     else:
                         pnl_percent = ((entry_price - current_sl) / entry_price) * 100 * remaining_position
-                    pnl = pnl_percent * POSITION_SIZE_USDT / 100
+                    pnl = pnl_percent * POSITION_SIZE_USDT * LEVERAGE / 100
                 
                 total_pnl += pnl
                 
@@ -253,7 +253,7 @@ class SignalBacktester:
                     else:
                         pnl_percent = ((entry_price - tp_target['price']) / entry_price) * 100 * close_amount
                     
-                    pnl = pnl_percent * POSITION_SIZE_USDT / 100
+                    pnl = pnl_percent * POSITION_SIZE_USDT * LEVERAGE / 100
                     total_pnl += pnl
                     
                     # Update remaining position
@@ -287,7 +287,7 @@ class SignalBacktester:
         else:
             pnl_percent = ((entry_price - exit_price) / entry_price) * 100 * remaining_position
         
-        pnl = pnl_percent * POSITION_SIZE_USDT / 100
+        pnl = pnl_percent * POSITION_SIZE_USDT * LEVERAGE / 100
         total_pnl += pnl
         
         return {
