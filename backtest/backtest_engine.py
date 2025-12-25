@@ -13,7 +13,8 @@ from config_backtest import (
     DEFAULT_SL_PERCENT,
     TIME_WINDOWS,
     POSITION_SIZE_USDT,
-    LEVERAGE
+    LEVERAGE,
+    USE_BETTER_MARKET_PRICE
 )
 
 
@@ -75,6 +76,56 @@ class SignalBacktester:
             sl_price = entry_price * (1 + sl_percent / 100)
         
         return tp_price, sl_price
+    
+    def get_market_price_at_signal(self, price_data, signal_datetime):
+        """
+        Get the current market price at signal time
+        
+        Args:
+            price_data (pd.DataFrame): 1-minute OHLCV data
+            signal_datetime (datetime): Signal timestamp
+        
+        Returns:
+            float or None: Current market price (close price of the candle at or before signal time)
+        """
+        # Find the candle at or before signal time
+        at_or_before = price_data[price_data['timestamp'] <= signal_datetime]
+        
+        if at_or_before.empty:
+            # If no data before signal, try to get first candle after
+            after = price_data[price_data['timestamp'] >= signal_datetime]
+            if not after.empty:
+                return float(after.iloc[0]['close'])
+            return None
+        
+        # Return close price of the most recent candle before or at signal time
+        return float(at_or_before.iloc[-1]['close'])
+    
+    def select_better_entry_price(self, signal_entry_price, market_price, side):
+        """
+        Select the better entry price between signal price and market price
+        
+        Args:
+            signal_entry_price (float): Entry price from signal
+            market_price (float): Current market price
+            side (str): 'long' or 'short'
+        
+        Returns:
+            tuple: (selected_entry_price, used_market_price)
+        """
+        if market_price is None:
+            return signal_entry_price, False
+        
+        if side.lower() == 'long':
+            # For long: market price is better if it's lower (better buy price)
+            if market_price < signal_entry_price:
+                return market_price, True
+        else:  # short
+            # For short: market price is better if it's higher (better sell price)
+            if market_price > signal_entry_price:
+                return market_price, True
+        
+        return signal_entry_price, False
     
     def check_entry_hit(self, price_data, signal_datetime, entry_price, side):
         """
@@ -342,14 +393,46 @@ class SignalBacktester:
                 'error': str(e)
             }
         
-        # Get entry price
-        entry_price = float(signal_row['entry'])
+        # Get entry price from signal
+        signal_entry_price = float(signal_row['entry'])
         
-        # Calculate TP and SL
+        # Optionally use better market price if enabled
+        if USE_BETTER_MARKET_PRICE:
+            market_price = self.get_market_price_at_signal(price_data, signal_datetime)
+            entry_price, used_market_price = self.select_better_entry_price(
+                signal_entry_price, market_price, side
+            )
+        else:
+            entry_price = signal_entry_price
+            used_market_price = False
+        
+        # Calculate TP and SL based on selected entry price
         tp_price, sl_price = self.calculate_default_tp_sl(entry_price, side, tp_percent, sl_percent)
         
         # Check if entry was hit
-        entry_info = self.check_entry_hit(price_data, signal_datetime, entry_price, side)
+        # If we used market price, entry is immediately filled at signal time
+        if used_market_price:
+            # Find the index of the candle at signal time
+            signal_candle = price_data[price_data['timestamp'] <= signal_datetime]
+            if not signal_candle.empty:
+                entry_idx = signal_candle.index[-1]
+                entry_info = {
+                    'hit': True,
+                    'entry_time': signal_datetime,
+                    'entry_index': entry_idx,
+                    'minutes_to_entry': 0
+                }
+            else:
+                # Fallback: use first available candle
+                first_candle = price_data.iloc[0]
+                entry_info = {
+                    'hit': True,
+                    'entry_time': first_candle['timestamp'],
+                    'entry_index': price_data.index[0],
+                    'minutes_to_entry': 0
+                }
+        else:
+            entry_info = self.check_entry_hit(price_data, signal_datetime, entry_price, side)
         
         # Simulate trade
         trade_result = self.simulate_trade(
@@ -369,7 +452,9 @@ class SignalBacktester:
             'symbol': symbol,
             'side': side,
             'signal_datetime': signal_datetime,
+            'signal_entry_price': signal_entry_price,
             'entry_price': entry_price,
+            'used_market_price': used_market_price if USE_BETTER_MARKET_PRICE else False,
             'tp_percent': tp_percent,
             'sl_percent': sl_percent,
             'tp_price': tp_price,
