@@ -184,6 +184,11 @@ def main():
         avg_win = wins['pnl'].mean() if len(wins) > 0 else 0
         avg_loss = losses['pnl'].mean() if len(losses) > 0 else 0
         
+        # Calculate Expectancy: (Win Rate * Avg Win) - (Loss Rate * Avg Loss)
+        win_rate_decimal = len(wins) / len(completed) if len(completed) > 0 else 0
+        loss_rate_decimal = len(losses) / len(completed) if len(completed) > 0 else 0
+        expectancy = (win_rate_decimal * avg_win) - (loss_rate_decimal * abs(avg_loss))
+        
         profit_factor = abs(wins['pnl'].sum() / losses['pnl'].sum()) if len(losses) > 0 and losses['pnl'].sum() != 0 else 0
         
         # Statistics by source (CSV vs defaults)
@@ -214,15 +219,28 @@ def main():
         print(f"Win Rate: {win_rate:.2f}%")
         print(f"Average Win: ${avg_win:.2f}")
         print(f"Average Loss: ${avg_loss:.2f}")
+        print(f"Expectancy: ${expectancy:.2f} per trade")
         print(f"Profit Factor: {profit_factor:.2f}")
         
         print(f"\nLONG TRADES ({len(long_trades)} total):")
         print(f"Wins: {len(long_wins)} | Losses: {len(long_losses)} | Expired: {len(long_expired)}")
-        print(f"Win Rate: {len(long_wins)/len(long_trades)*100:.1f}% | PnL: ${long_trades['pnl'].sum():.2f}")
+        long_wr = len(long_wins)/len(long_trades)*100 if len(long_trades) > 0 else 0
+        long_pnl = long_trades['pnl'].sum()
+        long_avg_win = long_wins['pnl'].mean() if len(long_wins) > 0 else 0
+        long_avg_loss = long_losses['pnl'].mean() if len(long_losses) > 0 else 0
+        long_expectancy = (len(long_wins)/len(long_trades)*long_avg_win) - (len(long_losses)/len(long_trades)*abs(long_avg_loss)) if len(long_trades) > 0 else 0
+        print(f"Win Rate: {long_wr:.1f}% | PnL: ${long_pnl:.2f}")
+        print(f"Expectancy: ${long_expectancy:.2f} per trade")
         
         print(f"\nSHORT TRADES ({len(short_trades)} total):")
         print(f"Wins: {len(short_wins)} | Losses: {len(short_losses)} | Expired: {len(short_expired)}")
-        print(f"Win Rate: {len(short_wins)/len(short_trades)*100:.1f}% | PnL: ${short_trades['pnl'].sum():.2f}")
+        short_wr = len(short_wins)/len(short_trades)*100 if len(short_trades) > 0 else 0
+        short_pnl = short_trades['pnl'].sum()
+        short_avg_win = short_wins['pnl'].mean() if len(short_wins) > 0 else 0
+        short_avg_loss = short_losses['pnl'].mean() if len(short_losses) > 0 else 0
+        short_expectancy = (len(short_wins)/len(short_trades)*short_avg_win) - (len(short_losses)/len(short_trades)*abs(short_avg_loss)) if len(short_trades) > 0 else 0
+        print(f"Win Rate: {short_wr:.1f}% | PnL: ${short_pnl:.2f}")
+        print(f"Expectancy: ${short_expectancy:.2f} per trade")
         
         if len(csv_trades) > 0:
             csv_win_rate = len(csv_trades[csv_trades['result'] == 'win']) / len(csv_trades) * 100
