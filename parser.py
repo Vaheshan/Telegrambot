@@ -9,46 +9,8 @@ import csv
 import os
 from typing import Optional, Dict, Any
 from datetime import datetime
-import google.generativeai as genai
-from pydantic import BaseModel, Field, field_validator, ValidationError
+from google import genai
 from scrapper import TelegramGroupScraper
-
-
-class Signal(BaseModel):
-    """Pydantic model for trading signal data."""
-    coin_name: Optional[str] = Field(None, description="Coin name (e.g., IDOLUSDT.P)")
-    entry_price: Optional[float] = Field(None, description="Entry price")
-    stop_loss: Optional[float] = Field(None, description="Stop loss price")
-    tp1: Optional[float] = Field(None, description="Take profit 1")
-    tp2: Optional[float] = Field(None, description="Take profit 2")
-    tp3: Optional[float] = Field(None, description="Take profit 3")
-    tp4: Optional[float] = Field(None, description="Take profit 4")
-    
-    @field_validator('entry_price', 'stop_loss', 'tp1', 'tp2', 'tp3', 'tp4', mode='before')
-    @classmethod
-    def parse_float_or_none(cls, v):
-        """Convert string numbers to float, keep None as None."""
-        if v is None or v == "":
-            return None
-        if isinstance(v, (int, float)):
-            return float(v)
-        if isinstance(v, str):
-            try:
-                return float(v)
-            except ValueError:
-                return None
-        return None
-
-
-class SignalResponse(BaseModel):
-    """Pydantic model for the complete response from Gemini."""
-    is_signal: bool = Field(description="Whether the message is a trading signal")
-    signal: Optional[Signal] = Field(None, description="Signal data if is_signal is true")
-    
-    def model_post_init(self, __context: Any):
-        """Validate that signal is None when is_signal is False."""
-        if not self.is_signal and self.signal is not None:
-            self.signal = None
 
 
 class SignalParser:
@@ -59,46 +21,10 @@ class SignalParser:
         Args:
             gemini_api_key: Your Google Gemini API key
         """
-        genai.configure(api_key=gemini_api_key)
+        self.client = genai.Client(api_key=gemini_api_key)
         
-        # Convert Pydantic models to JSON schema
-        raw_schema = SignalResponse.model_json_schema()
-        
-        # Clean schema to remove fields Gemini doesn't support
-        self.response_schema = self._clean_schema_for_gemini(raw_schema)
-        
-        # Format schema as JSON string for inclusion in prompt
-        schema_json = json.dumps(self.response_schema, indent=2)
-        
-        # First, find an available model
-        model_name = self._get_available_model()
-        
-        # Initialize model with structured output configuration
-        # Try to use structured output if supported
-        try:
-            generation_config = genai.types.GenerationConfig(
-                response_mime_type="application/json",
-                response_schema=self.response_schema
-            )
-            self.model = genai.GenerativeModel(
-                model_name,
-                generation_config=generation_config
-            )
-            print(f"✅ Using model: {model_name} with structured output")
-        except (AttributeError, TypeError, ValueError, Exception) as e:
-            # Fallback if structured output not supported in this version
-            # Just use regular model and include schema in prompt
-            print(f"⚠️  Structured output not available, using prompt-based schema: {e}")
-            try:
-                self.model = genai.GenerativeModel(model_name)
-                print(f"✅ Using model: {model_name} (without structured output)")
-            except Exception as model_error:
-                print(f"❌ Error initializing model {model_name}: {model_error}")
-                raise
-            generation_config = None
-        
-        # System prompt with JSON schema included
-        self.system_prompt = f"""You are a trading signal parser. Your task is to analyze Telegram messages and determine if they contain trading signals.
+        # System prompt with clear output format instructions
+        self.system_prompt = """You are a trading signal parser. Your task is to analyze Telegram messages and determine if they contain trading signals.
 
 SAMPLE SIGNAL MESSAGE FORMAT:
 #IDOLUSDT.P | SHORT 🔴
@@ -116,9 +42,6 @@ Stop Loss: 0.028266 ☠️
 Risk it like a pro, not a gambler.
 CBW Radar | © Cruzebow Premium™
 
-REQUIRED JSON SCHEMA (you must follow this exact structure):
-{schema_json}
-
 RULES:
 1. If the message is a trading signal (contains coin name, entry price, stop loss, and at least one TP), set "is_signal" to true and fill the "signal" object.
 2. If the message is NOT a signal, set "is_signal" to false and set "signal" to null.
@@ -127,153 +50,37 @@ RULES:
 5. Extract stop loss price
 6. Extract take profit prices (TP 1, TP 2, TP 3, TP 4) - fill them if present, otherwise set to null
 7. If there are more than 4 TPs, only extract the first 4
-8. The response MUST conform exactly to the JSON schema provided above.
+8. Numbers should be extracted as floats (e.g., 0.02731, not "0.02731")
+9. Extract trade side as "LONG" or "SHORT".
+10. If side cannot be determined, set it to null.
 
-Return ONLY a valid JSON object matching the schema, no additional text or explanation.
+OUTPUT FORMAT (you must return ONLY valid JSON in this exact format):
+{
+  "is_signal": true/false,
+  "signal": {
+    "coin_name": "IDOLUSDT.P" or null,
+    "entry_price": 0.02731 or null,
+    "side": "LONG" or "SHORT" or null,
+    "stop_loss": 0.028266 or null,
+    "tp1": 0.02701 or null,
+    "tp2": 0.026627 or null,
+    "tp3": 0.026218 or null,
+    "tp4": 0.025671 or null
+  }
+}
+
+If is_signal is false, set signal to null:
+{
+  "is_signal": false,
+  "signal": null
+}
+
+Return ONLY the JSON object, no additional text, explanation, or markdown formatting.
 """
-    
-    def _get_available_model(self) -> str:
-        """
-        Get an available Gemini model that supports generateContent.
-        
-        Returns:
-            Model name string
-        """
-        # Try common model names first
-        common_models = [
-            'gemini-1.5-flash',
-            'gemini-1.5-pro',
-            'gemini-pro',
-            'gemini-2.0-flash-exp',
-            'models/gemini-1.5-flash',
-            'models/gemini-1.5-pro',
-            'models/gemini-pro',
-        ]
-        
-        # Try each common model
-        for model_name in common_models:
-            try:
-                # Just test if we can create the model (doesn't make API call yet)
-                test_model = genai.GenerativeModel(model_name)
-                # If successful, return this model name
-                print(f"✅ Found available model: {model_name}")
-                return model_name
-            except Exception:
-                continue
-        
-        # If common models don't work, list available models
-        print("⚠️  Common models not available, listing all models...")
-        try:
-            models = genai.list_models()
-            available_models = []
-            for m in models:
-                if hasattr(m, 'supported_generation_methods') and 'generateContent' in m.supported_generation_methods:
-                    model_name = m.name
-                    # Extract just the model name part
-                    if '/' in model_name:
-                        model_name = model_name.split('/')[-1]
-                    available_models.append(model_name)
-            
-            if available_models:
-                selected = available_models[0]
-                print(f"✅ Found available model from API: {selected}")
-                print(f"   All available models: {available_models}")
-                return selected
-            else:
-                raise ValueError("No models with generateContent support found")
-        except Exception as e:
-            print(f"⚠️  Could not list models: {e}")
-            # Last resort: try gemini-1.5-flash (most commonly available)
-            print("⚠️  Trying gemini-1.5-flash as fallback...")
-            return 'gemini-1.5-flash'
-        
-        # System prompt with JSON schema included
-        self.system_prompt = f"""You are a trading signal parser. Your task is to analyze Telegram messages and determine if they contain trading signals.
-
-SAMPLE SIGNAL MESSAGE FORMAT:
-#IDOLUSDT.P | SHORT 🔴
-
-Entry: 0.02731 (CMP) 
-
-TP 1 → 0.02701
-TP 2 → 0.026627
-TP 3 → 0.026218
-TP 4 → 0.025671
-TP 5 → Extended Targets
-
-Stop Loss: 0.028266 ☠️
-
-Risk it like a pro, not a gambler.
-CBW Radar | © Cruzebow Premium™
-
-REQUIRED JSON SCHEMA (you must follow this exact structure):
-{schema_json}
-
-RULES:
-1. If the message is a trading signal (contains coin name, entry price, stop loss, and at least one TP), set "is_signal" to true and fill the "signal" object.
-2. If the message is NOT a signal, set "is_signal" to false and set "signal" to null.
-3. Extract coin name (e.g., "IDOLUSDT.P", "BTCUSDT", etc.)
-4. Extract entry price (may be marked as "CMP" or "Current Market Price")
-5. Extract stop loss price
-6. Extract take profit prices (TP 1, TP 2, TP 3, TP 4) - fill them if present, otherwise set to null
-7. If there are more than 4 TPs, only extract the first 4
-8. The response MUST conform exactly to the JSON schema provided above.
-
-Return ONLY a valid JSON object matching the schema, no additional text or explanation.
-"""
-    
-    def _clean_schema_for_gemini(self, schema: Dict[str, Any], defs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Clean JSON schema to remove fields that Gemini doesn't support.
-        
-        Args:
-            schema: Raw JSON schema from Pydantic
-            defs: Dictionary of definitions from $defs (for resolving $ref)
-            
-        Returns:
-            Cleaned schema compatible with Gemini
-        """
-        if isinstance(schema, dict):
-            # Extract $defs if present (first time through)
-            if defs is None and '$defs' in schema:
-                defs = schema.get('$defs', {})
-            
-            # Remove unsupported fields
-            cleaned = {}
-            for key, value in schema.items():
-                # Skip $defs and other unsupported fields
-                if key in ['$defs', '$schema', 'definitions']:
-                    continue
-                
-                # Handle $ref references by resolving them
-                if key == '$ref' and defs:
-                    ref_path = value.split('/')[-1]
-                    if ref_path in defs:
-                        # Recursively resolve the reference
-                        resolved = self._clean_schema_for_gemini(defs[ref_path], defs)
-                        # Merge resolved schema into cleaned
-                        cleaned.update(resolved)
-                    else:
-                        # If reference not found, make it a generic object
-                        cleaned['type'] = 'object'
-                    continue
-                
-                # Recursively clean nested objects
-                if isinstance(value, (dict, list)):
-                    cleaned[key] = self._clean_schema_for_gemini(value, defs)
-                else:
-                    cleaned[key] = value
-            
-            return cleaned
-        elif isinstance(schema, list):
-            return [self._clean_schema_for_gemini(item, defs) for item in schema]
-        else:
-            return schema
     
     def parse_message(self, message_text: str) -> Dict[str, Any]:
         """
         Parse a message using Gemini to extract signal information.
-        Uses Pydantic to validate the response structure.
         
         Args:
             message_text: The text content of the Telegram message
@@ -291,34 +98,50 @@ Return ONLY a valid JSON object matching the schema, no additional text or expla
             # Create the full prompt
             full_prompt = f"{self.system_prompt}\n\nMESSAGE TO ANALYZE:\n{message_text}\n\nReturn the JSON response:"
             
-            # Call Gemini API with structured output
-            response = self.model.generate_content(full_prompt)
+            # Call Gemini API
+            response = self.client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=full_prompt
+            )
             
-            # With structured output, response.text should be valid JSON
+            # Get response text
             response_text = response.text.strip()
             
-            # Parse JSON (should be valid due to schema enforcement)
+            # Remove markdown code blocks if present
+            if response_text.startswith("```"):
+                # Remove ```json or ``` at start and ``` at end
+                lines = response_text.split('\n')
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                response_text = '\n'.join(lines).strip()
+            
+            # Parse JSON
             json_data = json.loads(response_text)
             
-            # Validate and parse with Pydantic (double validation for safety)
-            signal_response = SignalResponse(**json_data)
+            # Validate basic structure
+            if not isinstance(json_data, dict) or "is_signal" not in json_data:
+                raise ValueError("Invalid response structure")
             
-            # Convert to dictionary format
+            # Ensure proper format
             result = {
-                "is_signal": signal_response.is_signal,
+                "is_signal": bool(json_data.get("is_signal", False)),
                 "signal": None
             }
             
-            # Convert signal to dict if present
-            if signal_response.signal:
+            # If it's a signal, validate and extract signal data
+            if result["is_signal"] and json_data.get("signal"):
+                signal_data = json_data["signal"]
                 result["signal"] = {
-                    "coin_name": signal_response.signal.coin_name,
-                    "entry_price": signal_response.signal.entry_price,
-                    "stop_loss": signal_response.signal.stop_loss,
-                    "tp1": signal_response.signal.tp1,
-                    "tp2": signal_response.signal.tp2,
-                    "tp3": signal_response.signal.tp3,
-                    "tp4": signal_response.signal.tp4,
+                    "coin_name": signal_data.get("coin_name"),
+                    "side": signal_data.get("side"),
+                    "entry_price": self._to_float(signal_data.get("entry_price")),
+                    "stop_loss": self._to_float(signal_data.get("stop_loss")),
+                    "tp1": self._to_float(signal_data.get("tp1")),
+                    "tp2": self._to_float(signal_data.get("tp2")),
+                    "tp3": self._to_float(signal_data.get("tp3")),
+                    "tp4": self._to_float(signal_data.get("tp4")),
                 }
             
             return result
@@ -331,25 +154,6 @@ Return ONLY a valid JSON object matching the schema, no additional text or expla
                 "is_signal": False,
                 "signal": None
             }
-        except ValidationError as e:
-            print(f"⚠️  Pydantic validation error: {e}")
-            if 'response_text' in locals():
-                print(f"Response text: {response_text[:200]}...")
-            # Try to extract what we can from the invalid data
-            try:
-                if 'json_data' in locals():
-                    # Fallback: create a basic response
-                    is_signal = json_data.get("is_signal", False)
-                    return {
-                        "is_signal": bool(is_signal),
-                        "signal": None  # Set to None if validation fails
-                    }
-            except:
-                pass
-            return {
-                "is_signal": False,
-                "signal": None
-            }
         except Exception as e:
             print(f"⚠️  Error parsing message: {e}")
             print(f"Error type: {type(e).__name__}")
@@ -357,6 +161,19 @@ Return ONLY a valid JSON object matching the schema, no additional text or expla
                 "is_signal": False,
                 "signal": None
             }
+    
+    def _to_float(self, value) -> Optional[float]:
+        """Convert value to float or None."""
+        if value is None or value == "":
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                return None
+        return None
     
     def save_to_csv(self, results: list, output_file: str = "parsed_signals.csv"):
         """
@@ -377,6 +194,7 @@ Return ONLY a valid JSON object matching the schema, no additional text or expla
             "message_text",
             "is_signal",
             "coin_name",
+            "side",
             "entry_price",
             "stop_loss",
             "tp1",
@@ -386,8 +204,6 @@ Return ONLY a valid JSON object matching the schema, no additional text or expla
         ]
         
         # Write to CSV
-        file_exists = os.path.exists(output_file)
-        
         with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
@@ -399,6 +215,7 @@ Return ONLY a valid JSON object matching the schema, no additional text or expla
                     "message_text": result.get("message_text", ""),
                     "is_signal": result.get("is_signal", False),
                     "coin_name": "",
+                    "side": "",
                     "entry_price": "",
                     "stop_loss": "",
                     "tp1": "",
@@ -412,6 +229,7 @@ Return ONLY a valid JSON object matching the schema, no additional text or expla
                 if signal:
                     row["coin_name"] = signal.get("coin_name", "") or ""
                     row["entry_price"] = signal.get("entry_price", "") or ""
+                    row["side"] = signal.get("side", "") or ""
                     row["stop_loss"] = signal.get("stop_loss", "") or ""
                     row["tp1"] = signal.get("tp1", "") or ""
                     row["tp2"] = signal.get("tp2", "") or ""
@@ -557,6 +375,7 @@ async def parse_realtime_messages(
             signal = parsed_result.get("signal", {})
             print(f"  ✅ SIGNAL DETECTED!")
             print(f"     Coin: {signal.get('coin_name', 'N/A')}")
+            print(f"     Side: {signal.get('side', 'N/A')}")
             print(f"     Entry: {signal.get('entry_price', 'N/A')}")
             print(f"     Stop Loss: {signal.get('stop_loss', 'N/A')}")
         else:
@@ -593,8 +412,7 @@ async def main():
         return
     
     # Get chat ID
-    # chat_id = input("Enter group username or ID (e.g., @mygroup or -1001234567890): ").strip()
-    chat_id="Sayan_Saba"
+    chat_id = "Sayan_Saba"
     if not chat_id:
         print("No chat ID provided. Exiting.")
         return
@@ -604,8 +422,8 @@ async def main():
     print("1. Parse historical messages")
     print("2. Parse real-time messages (listen for new messages)")
     
-    # choice = input("Enter choice (1/2): ").strip()
-    choice="2"
+    choice = "2"
+    
     if choice == "1":
         limit_input = input("Enter message limit (press Enter for all): ").strip()
         limit = int(limit_input) if limit_input else None
@@ -624,8 +442,7 @@ async def main():
         )
     
     elif choice == "2":
-        # output_file = input("Enter output CSV filename (default: parsed_signals_realtime.csv): ").strip() or "parsed_signals_realtime.csv"
-        output_file="parsed_signals_realtime.csv"
+        output_file = "parsed_signals_realtime.csv"
         if not output_file.endswith('.csv'):
             output_file += '.csv'
         
@@ -643,4 +460,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
