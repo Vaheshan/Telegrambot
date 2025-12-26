@@ -22,10 +22,15 @@ SL_STEP = 0.10   # Increment by 0.10%
 # Time windows to evaluate (in hours)
 TIME_WINDOWS = [12]  # Only 12h window
 
+# Signal timezone offset
+# Signals are timestamped in Sri Lanka time (UTC+5:30); Binance data is UTC.
+# Convert signal timestamps to UTC by subtracting this offset.
+SIGNAL_TIMEZONE_OFFSET_MINUTES = 330
+
 # Trading parameters
-LEVERAGE = 1  # Leverage for futures trading (1x = no leverage)
+LEVERAGE = 20  # Leverage for futures trading (1x = no leverage)
 POSITION_SIZE_USDT = 50  # Position size in USDT per trade
-MAX_CONCURRENT_POSITIONS = 5  # Maximum number of positions open at once
+MAX_CONCURRENT_POSITIONS = 10  # Maximum number of positions open at once
 
 # Entry price selection
 USE_BETTER_MARKET_PRICE = True  # If True, use current market price if it's better than signal entry price

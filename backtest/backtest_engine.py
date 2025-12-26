@@ -14,7 +14,8 @@ from config_backtest import (
     TIME_WINDOWS,
     POSITION_SIZE_USDT,
     LEVERAGE,
-    USE_BETTER_MARKET_PRICE
+    USE_BETTER_MARKET_PRICE,
+    SIGNAL_TIMEZONE_OFFSET_MINUTES
 )
 
 
@@ -371,6 +372,8 @@ class SignalBacktester:
         signal_date = pd.to_datetime(signal_row['date'])
         signal_time = pd.to_datetime(signal_row['time'], format='%H:%M').time()
         signal_datetime = datetime.combine(signal_date.date(), signal_time)
+        # Convert from SL time (UTC+5:30) to Binance/UTC time
+        signal_datetime = signal_datetime - timedelta(minutes=SIGNAL_TIMEZONE_OFFSET_MINUTES)
         
         # Download price data
         try:
@@ -397,11 +400,17 @@ class SignalBacktester:
         signal_entry_price = float(signal_row['entry'])
         
         # Optionally use better market price if enabled
+        market_price = None
+        entry_price_decrease_percent = None
         if USE_BETTER_MARKET_PRICE:
             market_price = self.get_market_price_at_signal(price_data, signal_datetime)
             entry_price, used_market_price = self.select_better_entry_price(
                 signal_entry_price, market_price, side
             )
+            
+            # Calculate percentage decrease if entry price changed and market price is lower
+            if used_market_price and market_price is not None and market_price < signal_entry_price:
+                entry_price_decrease_percent = ((signal_entry_price - market_price) / signal_entry_price) * 100
         else:
             entry_price = signal_entry_price
             used_market_price = False
@@ -455,6 +464,7 @@ class SignalBacktester:
             'signal_entry_price': signal_entry_price,
             'entry_price': entry_price,
             'used_market_price': used_market_price if USE_BETTER_MARKET_PRICE else False,
+            'entry_price_decrease_percent': entry_price_decrease_percent,
             'tp_percent': tp_percent,
             'sl_percent': sl_percent,
             'tp_price': tp_price,
