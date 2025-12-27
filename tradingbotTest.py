@@ -266,6 +266,28 @@ class BinanceFuturesTrader:
             return result
         return None
     
+    def get_current_price(self, symbol):
+        """
+        Get current market price for a symbol.
+        
+        Args:
+            symbol (str): Trading pair (e.g., 'BTCUSDT')
+            
+        Returns:
+            float: Current price or None if error
+        """
+        endpoint = "/fapi/v1/ticker/price"
+        params = {'symbol': symbol}
+        
+        try:
+            response = requests.get(f"{self.base_url}{endpoint}", params=params)
+            response.raise_for_status()
+            data = response.json()
+            return float(data['price'])
+        except Exception as e:
+            print(f"Error getting current price for {symbol}: {e}")
+            return None
+    
     def get_symbol_info(self, symbol):
         """Get trading rules for symbol (precision, min quantity, etc.)"""
         endpoint = "/fapi/v1/exchangeInfo"
@@ -512,7 +534,7 @@ class BinanceFuturesTrader:
         
         return result
     
-    def execute_trade(self, symbol, direction, leverage, entry_price, quantity, 
+    def execute_trade(self, symbol, direction, leverage, entry_price, dollar_amount, 
                       stop_loss_price, tp1_price, tp2_price, tp3_price, tp4_price, 
                       wait_timeout=300, auto_monitor=False):
         """
@@ -523,7 +545,7 @@ class BinanceFuturesTrader:
             direction (str): 'LONG' or 'SHORT'
             leverage (int): Leverage (1-125)
             entry_price (float): Limit order entry price
-            quantity (float): Total position size
+            dollar_amount (float): Amount in USDT to invest in this trade
             stop_loss_price (float): Stop loss price
             tp1_price, tp2_price, tp3_price, tp4_price (float): Take profit prices
             wait_timeout (int): Seconds to wait for entry order to fill (default 300s = 5min)
@@ -539,6 +561,22 @@ class BinanceFuturesTrader:
             print("❌ Could not get symbol information")
             return False
         
+        # Get current price to calculate quantity
+        current_price = self.get_current_price(symbol)
+        if not current_price:
+            print("❌ Could not get current price for symbol")
+            return False
+        
+        # Calculate quantity based on dollar amount and entry price
+        # Use entry_price for calculation (or current_price if entry is market)
+        price_for_calc = entry_price if entry_price > 0 else current_price
+        quantity = dollar_amount / price_for_calc
+        
+        print(f"💰 Trade Amount: ${dollar_amount:.2f} USDT")
+        print(f"📊 Current Price: ${current_price:.8f}")
+        print(f"🎯 Entry Price: ${entry_price:.8f}")
+        print(f"📈 Calculated Quantity: {quantity:.8f} {symbol.replace('USDT', '')}")
+        
         # Find quantity precision
         step_size = None
         for filter in symbol_info['filters']:
@@ -546,6 +584,11 @@ class BinanceFuturesTrader:
                 step_size = float(filter['stepSize'])
                 quantity = self.round_quantity(quantity, step_size)
                 break
+        
+        # Recalculate actual dollar amount after rounding
+        actual_dollar_amount = quantity * price_for_calc
+        print(f"✅ Rounded Quantity: {quantity:.8f} {symbol.replace('USDT', '')}")
+        print(f"💰 Actual Trade Amount: ${actual_dollar_amount:.2f} USDT")
         
         # Find price precision
         price_precision = None
@@ -730,7 +773,15 @@ def main():
         leverage = int(input("Enter leverage (1-125): ").strip())
         
         entry_price = float(input("Enter LIMIT entry price: ").strip())
-        quantity = float(input("Enter quantity to trade: ").strip())
+        dollar_amount = float(input("Enter amount in USDT to invest in this trade: ").strip())
+        
+        # Get current price to show user
+        trader_temp = BinanceFuturesTrader(api_key, api_secret, testnet=testnet)
+        current_price = trader_temp.get_current_price(symbol)
+        if current_price:
+            calculated_quantity = dollar_amount / entry_price
+            print(f"\n💡 Current market price: ${current_price:.8f}")
+            print(f"💡 Calculated quantity: {calculated_quantity:.8f} {symbol.replace('USDT', '')} (based on entry price)")
         
         wait_timeout = int(input("Enter wait timeout in seconds (e.g., 300 for 5min): ").strip())
         
@@ -750,7 +801,11 @@ def main():
         print(f"Direction: {direction}")
         print(f"Leverage: {leverage}x")
         print(f"Entry Price (LIMIT): {entry_price}")
-        print(f"Quantity: {quantity}")
+        print(f"Trade Amount: ${dollar_amount:.2f} USDT")
+        if current_price:
+            print(f"Current Price: ${current_price:.8f}")
+            estimated_quantity = dollar_amount / entry_price
+            print(f"Estimated Quantity: ~{estimated_quantity:.8f} {symbol.replace('USDT', '')}")
         print(f"Wait Timeout: {wait_timeout} seconds")
         print(f"Stop Loss: {stop_loss_price}")
         print(f"Take Profit 1 (25%): {tp1_price}")
@@ -767,7 +822,7 @@ def main():
                 direction=direction,
                 leverage=leverage,
                 entry_price=entry_price,
-                quantity=quantity,
+                dollar_amount=dollar_amount,
                 stop_loss_price=stop_loss_price,
                 tp1_price=tp1_price,
                 tp2_price=tp2_price,

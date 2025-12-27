@@ -202,7 +202,7 @@ class AutomatedTradingSystem:
         binance_api_secret: str,
         testnet: bool = True,
         leverage: int = 1,
-        quantity: float = 0.001,
+        dollar_amount: float = 10.0,
         wait_timeout: int = 300
     ):
         """
@@ -216,7 +216,7 @@ class AutomatedTradingSystem:
             binance_api_secret: Binance API Secret
             testnet: Use Binance testnet (default: True)
             leverage: Default leverage for trades (default: 1)
-            quantity: Default quantity for trades (default: 0.001)
+            dollar_amount: Default amount in USDT to invest per trade (default: 10.0)
             wait_timeout: Timeout for order fills in seconds (default: 300)
         """
         # Initialize components
@@ -233,7 +233,7 @@ class AutomatedTradingSystem:
         
         # Trading parameters
         self.leverage = leverage
-        self.quantity = quantity
+        self.dollar_amount = dollar_amount
         self.wait_timeout = wait_timeout
         
         # Track processed signals to avoid duplicates
@@ -244,7 +244,7 @@ class AutomatedTradingSystem:
         print(f"{'='*60}")
         print(f"Mode: {'🧪 TESTNET' if testnet else '⚠️ LIVE TRADING'}")
         print(f"Default Leverage: {leverage}x")
-        print(f"Default Quantity: {quantity}")
+        print(f"Default Trade Amount: ${dollar_amount:.2f} USDT per trade")
         print(f"{'='*60}\n")
     
     def validate_signal(self, signal: Dict[str, Any]) -> Tuple[bool, str]:
@@ -368,7 +368,7 @@ class AutomatedTradingSystem:
         print(f"Entry Price: {entry_price}")
         print(f"Stop Loss: {stop_loss}")
         print(f"Take Profits: {tp1}, {tp2}, {tp3}, {tp4}")
-        print(f"Quantity: {self.quantity}")
+        print(f"Trade Amount: ${self.dollar_amount:.2f} USDT")
         print(f"Leverage: {self.leverage}x")
         print(f"{'='*60}\n")
         
@@ -379,7 +379,7 @@ class AutomatedTradingSystem:
                 direction=side,
                 leverage=self.leverage,
                 entry_price=entry_price,
-                quantity=self.quantity,
+                dollar_amount=self.dollar_amount,
                 stop_loss_price=stop_loss,
                 tp1_price=tp1,
                 tp2_price=tp2,
@@ -549,7 +549,7 @@ async def main():
     # Get trading parameters
     print("\n--- Trading Parameters ---")
     leverage = int(input("Enter leverage (1-125, default 1): ").strip() or "1")
-    quantity = float(input("Enter default quantity (default 0.001): ").strip() or "0.001")
+    dollar_amount = float(input("Enter amount in USDT to invest per trade (default 10.0): ").strip() or "10.0")
     wait_timeout = int(input("Enter order wait timeout in seconds (default 300): ").strip() or "300")
     
     # Get chat ID
@@ -567,7 +567,7 @@ async def main():
         binance_api_secret=binance_api_secret,
         testnet=testnet,
         leverage=leverage,
-        quantity=quantity,
+        dollar_amount=dollar_amount,
         wait_timeout=wait_timeout
     )
     
