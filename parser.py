@@ -9,8 +9,12 @@ import csv
 import os
 from typing import Optional, Dict, Any
 from datetime import datetime
+from dotenv import load_dotenv
 from google import genai
 from scrapper import TelegramGroupScraper
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 class SignalParser:

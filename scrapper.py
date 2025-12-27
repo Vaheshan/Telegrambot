@@ -11,6 +11,10 @@ import json
 from datetime import datetime
 from typing import List, Optional, Callable
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 class TelegramGroupScraper:
